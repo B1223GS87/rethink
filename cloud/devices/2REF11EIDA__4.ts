@@ -11,15 +11,22 @@ import {
     fridgeRange,
     TemperatureUnit,
 } from './fridge_common'
+import { Enum } from '@/util/enum'
 
-const FLEX_OPTIONS = ['Chilled Wine', 'Deli/Snacks', 'Cold Drink', 'Meat/Seafood', 'Freezer']
+const FLEX_OPTIONS = Enum.of({
+    'Chilled Wine': 1,
+    'Deli/Snacks': 2,
+    'Cold Drink': 3,
+    'Meat/Seafood': 4,
+    Freezer: 5,
+})
 
 export default class Device extends AABBDevice {
     readonly deviceConfig: DeviceDiscovery
     temperatureUnit: TemperatureUnit | undefined
 
     constructor(HA: Connection, thinq: Thinq2Device, meta: Metadata) {
-        super(HA, thinq)
+        super(HA, thinq, false)
         this.deviceConfig = HADevice.config(meta, { name: 'LG Fridge' })
 
         // HomeAssistant configuration will be ready once we find out the temperature unit
@@ -60,7 +67,7 @@ export default class Device extends AABBDevice {
                         state_topic: '$this/flex_setpoint',
                         command_topic: '$this/flex_setpoint/set',
                         name: 'Convertible',
-                        options: FLEX_OPTIONS,
+                        options: FLEX_OPTIONS.options,
                     },
                     door: {
                         platform: 'binary_sensor',
@@ -79,18 +86,7 @@ export default class Device extends AABBDevice {
     }
 
     processAABB(buf: Buffer) {
-        // I'm not sure what is the proper way to identify packet types, so let's match
-        // on the length and a few initial bytes
-
-        if (buf.length === 2 + 68 * 2 && buf[0] == 0x10 && buf[1] == 0xec) {
-            // 10EC (prev status) (cur status)
-            this.processStatus(buf.subarray(2 + 68, 2 + 68 + 68))
-        }
-
-        if (buf.length === 2 + 68 && buf[0] == 0x10 && buf[1] == 0xeb) {
-            // 10EB (initial status)
-            this.processStatus(buf.subarray(2, 2 + 68 + 68))
-        }
+        this.processCommonStatus(buf, 0x10, 68, this.processStatus)
     }
 
     processStatus(curStatus: Buffer) {
@@ -112,7 +108,7 @@ export default class Device extends AABBDevice {
         this.publishProperty('door', anyDoorOpen === 1 ? 'ON' : 'OFF')
         this.publishProperty('fridge_setpoint', setpointFridge)
         this.publishProperty('freezer_setpoint', setpointFreezer)
-        this.publishProperty('flex_setpoint', FLEX_OPTIONS[setpointFlex - 1])
+        this.publishProperty('flex_setpoint', FLEX_OPTIONS.map(setpointFlex))
     }
 
     //  0                   1                   2                   3                   4                   5                   6                   7                   8                   9                  10
@@ -151,10 +147,10 @@ export default class Device extends AABBDevice {
             baseMessage[2 + 2] = convertFreezerTemperature(unit, Number(mqttValue))
             this.send(baseMessage)
         } else if (prop === 'flex_setpoint') {
-            const index = FLEX_OPTIONS.indexOf(mqttValue)
-            if (index < 0) console.warn(`Unexpected value ${mqttValue}`)
+            const code = FLEX_OPTIONS.unmap(mqttValue)
+            if (code === undefined) console.warn(`Unexpected value ${mqttValue}`)
             else {
-                baseMessage[2 + 13] = 1 + index
+                baseMessage[2 + 13] = code
                 this.send(baseMessage)
             }
         } else {

@@ -5,6 +5,7 @@ import { type Metadata } from '../thinq'
 import { allowExtendedType } from '@/util/casting'
 import * as TLV from '@/util/tlv'
 import HADevice from './base'
+import { Enum } from '@/util/enum'
 
 /**
  * TLV tags present in capability (0xA7/0x01) packets — store during the caps query phase
@@ -19,28 +20,22 @@ const BUCKET_EMPTIED_EVENT = 256
 /** Entering these modes resets fan speed to low (high remains user-selectable). */
 const SILENT_MODES = new Set([2, 19])
 
-const HA_MODES = ['Smart', 'Jet', 'Silent', 'Spot', 'Laundry'] as const
+/**
+ * Each mode answers under two codes — the low one the unit reports, the 16-higher one it is set
+ * with — so both read back as the same label and writes always take the 17..21 form.
+ */
+const MODES = Enum.of({
+    Smart: [17, 0],
+    Jet: [18, 1],
+    Silent: [19, 2],
+    Spot: [20, 4],
+    Laundry: [21, 5],
+})
 
-const CLIP_TO_HA_MODE: Record<number, string> = {
-    0: 'Smart',
-    1: 'Jet',
-    2: 'Silent',
-    4: 'Spot',
-    5: 'Laundry',
-    17: 'Smart',
-    18: 'Jet',
-    19: 'Silent',
-    20: 'Spot',
-    21: 'Laundry',
-}
-
-const HA_TO_CLIP_MODE: Record<string, number> = {
-    Smart: 17,
-    Jet: 18,
-    Silent: 19,
-    Spot: 20,
-    Laundry: 21,
-}
+const FAN_SPEEDS = Enum.of({
+    low: 2,
+    high: 6,
+})
 
 /**
  * Per-mode fan capability table resent with every fan-speed write.
@@ -84,8 +79,6 @@ export default class Device extends TLVDevice {
     modePrev?: string
     modeClipPrev?: number
     initialValuesReceived = false
-    /** Last bucket-full state published to HA (retained). */
-    bucketFullHaState?: boolean
 
     constructor(HA: Connection, thinq: Thinq2Device, meta: Metadata) {
         super(HA, thinq)
@@ -97,7 +90,7 @@ export default class Device extends TLVDevice {
                     unique_id: '$deviceid-humidifier',
                     name: null,
                     device_class: 'dehumidifier',
-                    modes: [...HA_MODES],
+                    modes: MODES.options,
                     min_humidity: 30,
                     max_humidity: 70,
                 } satisfies HumidifierComponent,
@@ -125,7 +118,7 @@ export default class Device extends TLVDevice {
                     unique_id: '$deviceid-fan_speed',
                     name: 'Fan speed',
                     icon: 'mdi:fan',
-                    options: ['low', 'high'],
+                    options: FAN_SPEEDS.options,
                 },
                 current_humidity: {
                     platform: 'sensor',
@@ -176,7 +169,7 @@ export default class Device extends TLVDevice {
             id: 0x1f9,
             name: 'mode',
             comp: 'humidifier',
-            read_xform: (raw) => CLIP_TO_HA_MODE[raw] ?? `mode${raw}`,
+            read_xform: (raw) => MODES.map(raw),
             read_callback: () => {
                 const mode = this.raw_clip_state[0x1f9]
                 if (
@@ -199,7 +192,7 @@ export default class Device extends TLVDevice {
                 this.raw_clip_state[0x1f7] = 1
 
                 const mode = normalizeHaMode(val)
-                const clip = HA_TO_CLIP_MODE[mode] ?? Number(val)
+                const clip = MODES.unmap(mode)
                 if (mode === 'Silent' && (this.modeClipPrev == null || !SILENT_MODES.has(this.modeClipPrev))) {
                     this.raw_clip_state[0x1fa] = 2
                     this.publishFanSpeedState('low')
@@ -214,18 +207,12 @@ export default class Device extends TLVDevice {
             id: 0x1fa,
             name: '',
             comp: 'fan_speed',
-            read_xform: (raw) => {
-                const modes2ha: Record<number, string> = { 2: 'low', 6: 'high' }
-                return modes2ha[raw] ?? raw.toString()
-            },
+            read_xform: (raw) => FAN_SPEEDS.map(raw),
             read_callback: (val) => {
                 this.publishFanSpeedState(typeof val === 'string' ? val : String(val))
                 return false
             },
-            write_xform: (val) => {
-                const modes2clip: Record<string, number> = { low: 2, high: 6 }
-                return modes2clip[val] ?? Number(val)
-            },
+            write_xform: (val) => FAN_SPEEDS.unmap(val),
             write_callback: (val) => {
                 if (val !== 2 && val !== 6) return false
                 this.sendFanSpeedTlvs(val)
@@ -334,14 +321,13 @@ export default class Device extends TLVDevice {
 
     private fanSpeedFromClip(raw?: number): string {
         const v = raw ?? this.raw_clip_state[0x1fa]
-        if (v === 6) return 'high'
-        if (v === 2) return 'low'
-        return v != null ? String(v) : 'low'
+        if (v == null) return 'low'
+        return FAN_SPEEDS.map(v) ?? String(v)
     }
 
     private publishFanSpeedState(override?: string) {
         const state = override ?? this.fanSpeedFromClip()
-        this.HA.publishProperty(this.id, 'fan_speed-', state)
+        this.publishProperty('fan_speed-', state)
     }
 
     /**
@@ -373,12 +359,6 @@ export default class Device extends TLVDevice {
         this.send([1, 1, 2, 1, 1], this.buildFanSpeedTlvs(fan))
     }
 
-    private publishBucketFullState(full: boolean) {
-        if (this.bucketFullHaState === full) return
-        this.bucketFullHaState = full
-        this.HA.publishProperty(this.id, 'bucket_full-', full ? 'ON' : 'OFF', { retain: true })
-    }
-
     processKeyValue(k: number, v: number) {
         if (this.query_caps_timeout !== undefined && CAPS_ONLY_TAGS.has(k)) {
             this.raw_clip_state[k] = v
@@ -388,12 +368,12 @@ export default class Device extends TLVDevice {
         if (k === 0x2d7 || k === 0x2d8 || k === 0x2d9) return
         if (k === 0x2b1) {
             this.raw_clip_state[k] = v
-            if (v === BUCKET_EMPTIED_EVENT) this.publishBucketFullState(false)
+            if (v === BUCKET_EMPTIED_EVENT) this.publishProperty('bucket_full-', 'OFF')
             return
         }
         if (k === 0x2b2) {
             this.raw_clip_state[k] = v
-            this.publishBucketFullState(v !== 0)
+            this.publishProperty('bucket_full-', v !== 0 ? 'ON' : 'OFF')
             return
         }
         super.processKeyValue(k, v)
@@ -423,6 +403,6 @@ export default class Device extends TLVDevice {
         if (this.initialValuesReceived) return
         this.initialValuesReceived = true
 
-        this.thinq.send('setMaskingInfo', 0, { blacklist_tlv: '1200' })
+        this.send_custom('setMaskingInfo', 0, { blacklist_tlv: '1200' })
     }
 }

@@ -1,9 +1,11 @@
 import { createHash, publicEncrypt, randomBytes } from 'node:crypto'
 import * as OAuth2 from './oauth2'
 import { RSA_PKCS1_PADDING } from 'node:constants'
-import { subprocess } from './util'
+import { createCertificateRequest } from '@/util/pki'
 import fetch, { type RequestInit } from 'node-fetch'
 import { Metadata } from '@/cloud/thinq'
+import log from '@/util/logging'
+import { agent } from './resolver'
 
 export const IOT_BASE_URL = 'https://common.lgthinq.com'
 const GATEWAY_URL = 'https://route.lgthinq.com:46030/v1/service/application/gateway-uri'
@@ -26,6 +28,7 @@ export async function apiFetch<T = unknown>(url: string, options: RequestInit): 
     for (let i = 0; ; i++) {
         try {
             const resp = await fetch(url, {
+                agent,
                 ...options,
                 headers: {
                     ...(options.headers ?? {}),
@@ -35,7 +38,9 @@ export async function apiFetch<T = unknown>(url: string, options: RequestInit): 
             out = (await resp.json()) as { resultCode: string; result: T }
             break
         } catch (err) {
+            log('bridge', `Error fetching ${url}: ${err}`)
             if (i >= 3) throw err
+
             await new Promise((resolve) => setTimeout(resolve, 1000))
         }
     }
@@ -96,6 +101,11 @@ type HomeResponse = {
 }
 
 type OtpResponse = { otp: string; publicKey: string }
+
+type ModelJsonResponse = {
+    modelJsonUri: string
+    modelJsonVer?: string
+}
 
 export type Environment = {
     countryCode: string
@@ -262,6 +272,28 @@ export class Client {
         }
     }
 
+    // The modelJSON describes the capabilities of a device model (field layouts, enum values,
+    // course tables). The descriptor call requires a device registered in the current account,
+    // but the URI it returns is a plain, time-limited link that needs no authentication.
+    async getModelJson(deviceId: string, modelName: string) {
+        const { thinq2Uri } = await this.gateway
+        const url = new URL(`${thinq2Uri}/service/application/modeljson`)
+        url.searchParams.set('deviceId', deviceId)
+        url.searchParams.set('modelName', modelName)
+
+        const { modelJsonUri } = await apiFetch<ModelJsonResponse>(url.toString(), { headers: this.headers })
+
+        try {
+            const resp = await fetch(modelJsonUri, { agent })
+            if (!resp.ok) throw new Error(`Can't download the modelJSON: HTTP ${resp.status}`)
+
+            return await resp.text()
+        } catch (err) {
+            log('bridge', `Failed to fetch ${modelJsonUri}: ${err}`)
+            throw err
+        }
+    }
+
     async getDeviceStatus(deviceId: string) {
         const { thinq2Uri } = await this.gateway
         return await apiFetch(`${thinq2Uri}/service/devices/${deviceId}`, { headers: this.headers })
@@ -352,32 +384,13 @@ export class Thinq2Device implements Device {
         console.log('Fetching CA cert')
         // DEV call
         const { certificatePem: ca } = await apiFetch<RouteCertResponse>(
-            `${IOT_BASE_URL}/route/certificate?name=aws-iot`,
+            `${servers.apiServer}/route/certificate?name=aws-iot`,
             { headers: { accept: 'application/json' } },
         )
 
         console.log('Trying to generate a certificate with otp', otpResponse.otp)
 
-        const privateKey = await subprocess('openssl', [
-            'ecparam',
-            '-genkey',
-            '-name',
-            'prime256v1',
-            '-noout',
-            '-out',
-            '-',
-        ])
-        const publicKey = await subprocess('openssl', ['ec', '-pubout', '-out', '-'], privateKey)
-
-        // we need to involve `cat`, because:
-        // 1. openssl req can't read the private key from stdin directly
-        // 2. nodejs passes a socket into the subprocess' stdin
-        // 3. opening a socket via /dev/stdin doesn't work on Linux
-        const csr = await subprocess(
-            'sh',
-            ['-c', `cat | openssl req -new -key /dev/stdin -subj '/CN=*.clip.com/O=LGE/C=KR'`],
-            privateKey,
-        )
+        const { privateKey, publicKey, csr } = await createCertificateRequest('CN=*.clip.com, O=LGE, C=KR', 'ec-p256')
 
         const ciphertext = publicEncrypt(
             { key: otpResponse.publicKey, padding: RSA_PKCS1_PADDING },

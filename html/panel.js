@@ -5,11 +5,12 @@ document.addEventListener('DOMContentLoaded', function () {
     M.Autocomplete.init(document.querySelectorAll('.autocomplete'), {
         data: {
             '101 (Refrigerator)': null,
+            '103 (Water purifier)': null,
             '201 (Washer)': null,
             '202 (Dryer)': null,
             '204 (Dishwasher)': null,
             '223 (WashTower)': null,
-            '301 (Gas Range)': null,
+            '301 (Range)': null,
             '302 (Microwave)': null,
             '401 (Air Conditioner)': null,
         },
@@ -21,6 +22,11 @@ let reconnectTimer
 const STATUS_OK = `<i class="tiny material-icons green-text">check</i>`
 const STATUS_ERROR = `<i class="tiny material-icons red-text">error</i>`
 const STATUS_UNKNOWN = `<i class="tiny material-icons red-text">question_mark</i>`
+// Not an error: the bridge was left out of the configuration on purpose.
+const STATUS_DISABLED = `<i class="tiny material-icons grey-text">block</i>`
+// A cloud, not a check: this is the state of the link out to LG, not of the appliance or of rethink.
+const BRIDGE_ONLINE = `<i class="tiny material-icons green-text">cloud_done</i>`
+const BRIDGE_OFFLINE = `<i class="tiny material-icons red-text">cloud_off</i>`
 let bridge_status = false
 
 get('status_rethink').innerHTML = STATUS_UNKNOWN
@@ -33,6 +39,10 @@ const devices = {}
 const baseUrl = new URL(window.location)
 baseUrl.search = ''
 baseUrl.hash = ''
+
+function escapeHtml(string) {
+    return string.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)}`)
+}
 
 class DeviceEntry {
     constructor(id, remoteState, parent) {
@@ -56,45 +66,64 @@ class DeviceEntry {
         const children = []
 
         let td
+        // The owner's own name for the appliance, which only the bridge can know. Without it four
+        // identical ceiling cassettes are four rows of the same model and a different UUID.
         td = document.createElement('td')
-        td.innerText = this.id
+        td.className = 'dev-name'
+        td.innerText = this.remoteState.name || '—'
+        td.title = this.remoteState.name || '' // the cell is cut off on a narrow screen
         children.push(td)
 
         td = document.createElement('td')
-        let model = this.remoteState.model
+        td.className = 'dev-id'
+        td.innerText = this.id
+        td.title = this.id
+        children.push(td)
+
+        td = document.createElement('td')
+        td.className = 'dev-model'
+        let model = escapeHtml(this.remoteState.model)
         if (!this.remoteState.mapped) {
             model += ` <i class="material-icons tooltipped tiny" data-position="bottom" data-tooltip="This device is not supported by rethink. It will not be mapped to HomeAssistant">warning</i>`
         }
+        if (this.remoteState.packageId)
+            model += `<div class="packageId">packageId: ${escapeHtml(this.remoteState.packageId)}</div>`
         td.innerHTML = model
         children.push(td)
 
         td = document.createElement('td')
+        td.className = 'dev-platform'
         td.innerText = this.remoteState.platform
         children.push(td)
 
+        // The width lives in the stylesheet now: on a narrow screen this cell moves out of the
+        // column layout entirely, and a fixed width there would push the row wide again.
         td = document.createElement('td')
-        td.style = 'width: 10em'
-
+        td.className = 'dev-bridge'
         td.innerHTML = `
-            <div class="switch">
-                <label>Off <input type="checkbox"> <span class="lever"></span>On</label>
-            </div>
-            <div class="hide preloader-wrapper verysmall active">
-                <div class="spinner-layer spinner-green-only">
-                <div class="circle-clipper left">
-                    <div class="circle"></div>
-                </div><div class="gap-patch">
-                    <div class="circle"></div>
-                </div><div class="circle-clipper right">
-                    <div class="circle"></div>
+            <div class="bridge-cell">
+                <div class="switch">
+                    <label>Off <input type="checkbox"> <span class="lever"></span>On</label>
                 </div>
+                <div class="hide preloader-wrapper verysmall active">
+                    <div class="spinner-layer spinner-green-only">
+                    <div class="circle-clipper left">
+                        <div class="circle"></div>
+                    </div><div class="gap-patch">
+                        <div class="circle"></div>
+                    </div><div class="circle-clipper right">
+                        <div class="circle"></div>
+                    </div>
+                    </div>
                 </div>
+                <span class="bridge-state"></span>
             </div>`
         children.push(td)
 
         this.bridgeSwitch = td.getElementsByTagName('input')[0]
         this.bridgeDiv = td.getElementsByClassName('switch')[0]
         this.spinner = td.getElementsByClassName('preloader-wrapper')[0]
+        this.bridgeState = td.getElementsByClassName('bridge-state')[0]
 
         const startBridge = async (deviceType) => {
             this.bridgeBusy = true
@@ -102,7 +131,9 @@ class DeviceEntry {
 
             try {
                 await fetchWrapper(`bridge/${this.id}/enable`, { deviceType }, { method: 'POST' })
-                this.remoteState.bridged = true
+                // Registered, but the cloud connection is only just being made - rethink says so
+                // with a {devices} broadcast of its own once it is up.
+                this.remoteState.bridgeState = 'offline'
             } finally {
                 this.bridgeBusy = false
                 this.refreshUI()
@@ -115,7 +146,7 @@ class DeviceEntry {
 
             try {
                 await fetchWrapper(`bridge/${this.id}/disable`, {}, { method: 'POST' })
-                this.remoteState.bridged = false
+                this.remoteState.bridgeState = 'disabled'
             } finally {
                 this.bridgeBusy = false
                 this.refreshUI()
@@ -141,8 +172,21 @@ class DeviceEntry {
         }
 
         td = document.createElement('td')
-        td.innerHTML = `<a class="btn waves-effect waves-light" href="monitor?id=${this.id}"><i class="material-icons">troubleshoot</i></a>`
+        // Materialize disables a button with pointer-events: none, which would swallow the hover
+        // that opens its tooltip - so the tooltip lives on a wrapper instead of on the button.
+        td.className = 'dev-actions'
+        td.innerHTML = `
+            <span class="tooltipped" style="display: inline-block" data-position="bottom" data-tooltip="Monitor">
+                <a class="btn waves-effect waves-light" href="monitor?id=${escapeHtml(this.id)}"><i class="material-icons">troubleshoot</i></a>
+            </span>
+            <span class="tooltipped" style="display: inline-block" data-position="bottom"
+                data-tooltip="Download the modelJSON file. Requires bridge mode.">
+                <a class="btn waves-effect waves-light"><i class="material-icons">description</i></a>
+            </span>`
         children.push(td)
+
+        this.modelJsonButton = td.getElementsByTagName('a')[1]
+        this.modelJsonButton.onclick = () => this.downloadModelJson()
 
         this.row.replaceChildren(...children)
         Array.from(this.row.getElementsByClassName('tooltipped')).forEach((e) => M.Tooltip.init(e))
@@ -156,18 +200,68 @@ class DeviceEntry {
     }
 
     refreshUI() {
+        // Tested against the two states that mean "on" rather than against 'disabled', so that an
+        // unset value reads as off instead of as a bridge nobody asked for.
+        const state = this.remoteState.bridgeState
+        const enabled = state === 'online' || state === 'offline'
+
         if (this.bridgeBusy) {
             this.bridgeDiv.classList.add('hide')
             this.spinner.classList.remove('hide')
         } else {
             this.spinner.classList.add('hide')
             this.bridgeDiv.classList.remove('hide')
-            this.bridgeSwitch.checked = !!this.remoteState.bridged
+            this.bridgeSwitch.checked = enabled
+        }
+
+        // Two different facts, so two different controls: the switch is what bridge mode has been
+        // set to, this is whether the connection to LG behind it is actually up. A device with the
+        // bridge off gets no icon - the switch has already said everything there is to say - and
+        // neither does one mid-enable, where the spinner has taken the switch's place.
+        if (this.bridgeBusy || !enabled) {
+            this.bridgeState.innerHTML = ''
+            this.bridgeState.title = ''
+        } else if (state === 'online') {
+            this.bridgeState.innerHTML = BRIDGE_ONLINE
+            this.bridgeState.title = 'Connected to the LG cloud'
+        } else {
+            this.bridgeState.innerHTML = BRIDGE_OFFLINE
+            this.bridgeState.title = 'Not connected to the LG cloud. Retrying every few seconds.'
         }
 
         // Materialize greys out a switch from the disabled attribute, not from a class, so setting
         // a class left the switch live while logged out - clicking it just produced an HTTP 400.
         this.bridgeSwitch.disabled = !bridge_status
+
+        // the modelJSON only comes from the ThinQ cloud, and only for a device registered there
+        this.modelJsonButton.classList.toggle('disabled', !(bridge_status && enabled))
+    }
+
+    // The modelJSON is fetched by rethink and handed over as a blob, so that a failure shows up as a
+    // toast instead of navigating the panel away to an error page.
+    async downloadModelJson() {
+        if (this.modelJsonButton.classList.contains('disabled') || this.modelJsonBusy) return
+
+        this.modelJsonBusy = true
+        try {
+            const response = await fetch(`${baseUrl}bridge/${this.id}/modeljson`)
+            if (response.status >= 300) {
+                M.toast({ html: `HTTP error ${response.status}: ${await response.text()}` })
+                return
+            }
+
+            const match = /filename="([^"]*)"/.exec(response.headers.get('content-disposition') ?? '')
+            const url = URL.createObjectURL(await response.blob())
+            const link = document.createElement('a')
+            link.href = url
+            link.download = match ? match[1] : `${this.id}.json`
+            link.click()
+            URL.revokeObjectURL(url)
+        } catch (err) {
+            M.toast({ html: `FETCH error: ${err}` })
+        } finally {
+            this.modelJsonBusy = false
+        }
     }
 }
 
@@ -205,6 +299,11 @@ function connect() {
     ws.onmessage = (ev) => {
         if (typeof ev.data === 'string') {
             const json = JSON.parse(ev.data)
+            if (typeof json.revision === 'string') {
+                // one in the header bar, one under the title on a narrow screen
+                document.querySelectorAll('.revision').forEach((el) => (el.innerText = json.revision))
+            }
+
             if (typeof json.ha === 'boolean') {
                 get('status_mqtt').innerHTML = json.ha ? STATUS_OK : STATUS_ERROR
             }
@@ -222,11 +321,23 @@ function connect() {
                     if (!devices[id]) devices[id] = new DeviceEntry(id, j, get('devices_body'))
                     else devices[id].update(j)
                 }
+
+                // Only the bridge knows the names, and only when a ThinQ account is linked. Decided
+                // over the whole list rather than per row: the column either says something about
+                // these appliances or it says nothing about any of them.
+                const named = Object.values(devices).some((dev) => dev.remoteState.name)
+                get('devices_table').classList.toggle('no-names', !named)
             }
 
             if (typeof json.bridge === 'object') {
                 bridge_status = json.bridge.loggedIn
-                if (json.bridge.loggedIn === true) {
+                if (json.bridge.disabled) {
+                    document.getElementById('btn_thinq_login').classList.add('hide')
+                    document.getElementById('btn_thinq_logout').classList.add('hide')
+
+                    get('status_bridge').innerHTML = STATUS_DISABLED
+                    get('status_bridge_text').innerText = 'Disabled by configuration file'
+                } else if (json.bridge.loggedIn === true) {
                     document.getElementById('btn_thinq_login').classList.add('hide')
                     document.getElementById('btn_thinq_logout').classList.remove('hide')
 

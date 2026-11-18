@@ -121,7 +121,7 @@ describe('F3L7CYK5W_US_WIFI', () => {
         const p = feed([EB_OFF])
         assert.equal(p.power, 'OFF')
         assert.equal(p.status, 'Off')
-        assert.equal(p.course, 'unknown') // 0xFE is the no-selection sentinel
+        assert.equal(p.course, 'None') // 0xFE is the no-selection sentinel
         assert.equal(p.remaining_time, 0)
         assert.equal(p.tub_clean_count, 43)
     })
@@ -138,7 +138,7 @@ describe('F3L7CYK5W_US_WIFI', () => {
     test('while selecting, remaining and initial time agree', () => {
         const p = feed([SELECTING])
         assert.equal(p.power, 'ON')
-        assert.equal(p.status, 'Initial')
+        assert.equal(p.status, 'Standby')
         assert.equal(p.course, 'Normal')
         assert.equal(p.soil, 'Normal')
         assert.equal(p.spin, 'High')
@@ -149,7 +149,7 @@ describe('F3L7CYK5W_US_WIFI', () => {
 
     test('Sensing is a real distinct phase on this model', () => {
         const p = feed([SELECTING, SENSING])
-        assert.equal(p.status, 'Sensing')
+        assert.equal(p.status, 'Detecting')
         assert.equal(p.remaining_time, 63)
     })
 
@@ -232,24 +232,24 @@ describe('F3L7CYK5W_US_WIFI', () => {
         assert.equal(running.load_level, 7) // cloud: loadLevel 7
 
         const adding = feed([RINSE_SPIN_ON, RINSING, ADD_GARMENTS])
-        assert.equal(adding.status, 'Add Garments') // cloud: ADD_DRAIN
+        assert.equal(adding.status, 'Filling') // cloud: ADD_DRAIN
         assert.equal(adding.door_lock, 'OFF') // the whole point of the feature
 
         const paused = feed([RINSE_SPIN_ON, RINSING, ADD_GARMENTS, PAUSED])
-        assert.equal(paused.status, 'Pause') // cloud: PAUSE
+        assert.equal(paused.status, 'Paused') // cloud: PAUSE
         assert.equal(paused.door_lock, 'OFF')
     })
 
     test('a real run: Washing -> Rinsing -> Spinning, settings drop out as they stop applying', () => {
         const rinsing = feed([WASHING_START, WASHING_TO_RINSING])
         assert.equal(rinsing.status, 'Rinsing')
-        assert.equal(rinsing.soil, 'unknown') // soil index goes to 0 once washing ends
+        assert.equal(rinsing.soil, 'None') // soil index goes to 0 once washing ends
         assert.equal(rinsing.temp, 'Warm')
         assert.equal(rinsing.initial_time, 80)
 
         const spinning = feed([WASHING_START, WASHING_TO_RINSING, SPINNING])
         assert.equal(spinning.status, 'Spinning')
-        assert.equal(spinning.temp, 'unknown')
+        assert.equal(spinning.temp, 'None')
         assert.equal(spinning.door_lock, 'ON')
     })
 
@@ -258,7 +258,7 @@ describe('F3L7CYK5W_US_WIFI', () => {
         assert.equal(before.tub_clean_count, 43)
 
         const done = feed([WASHING_START, SPINNING, CYCLE_COMPLETE])
-        assert.equal(done.status, 'Complete')
+        assert.equal(done.status, 'End')
         assert.equal(done.power, 'ON') // Complete is still powered on
         assert.equal(done.tub_clean_count, 44) // cloud: TCLCount
         assert.equal(done.door_lock, 'OFF')
@@ -269,8 +269,8 @@ describe('F3L7CYK5W_US_WIFI', () => {
 
     test('the Rinse+Spin run also lands on Complete', () => {
         const p = feed([RINSING, RUN_COMPLETE])
-        assert.equal(p.status, 'Complete')
-        assert.equal(p.course, 'unknown') // parks on the 0xFE sentinel
+        assert.equal(p.status, 'End')
+        assert.equal(p.course, 'None') // parks on the 0xFE sentinel
         assert.equal(p.tub_clean_count, 46)
     })
 
@@ -278,14 +278,14 @@ describe('F3L7CYK5W_US_WIFI', () => {
         const p = feed([WASHING_START, SPINNING, CYCLE_COMPLETE, OFF])
         assert.equal(p.status, 'Off')
         assert.equal(p.power, 'OFF')
-        assert.equal(p.course, 'unknown')
+        assert.equal(p.course, 'None')
         assert.equal(p.remaining_time, 0)
     })
 
     test('0xE2 post-cycle replay frames are ignored, not treated as status', () => {
         // fed straight after a completed cycle, this frame must not drag the machine back to Sensing
         const p = feed([WASHING_START, SPINNING, CYCLE_COMPLETE, E2_STALE_REPLAY])
-        assert.equal(p.status, 'Complete')
+        assert.equal(p.status, 'End')
         assert.equal(p.tub_clean_count, 44) // not rolled back to the frame's stale 43
         assert.equal(p.remaining_time, 0) // not the frame's stale 63
     })

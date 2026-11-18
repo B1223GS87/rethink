@@ -4,6 +4,7 @@ import { type Connection } from '../homeassistant'
 import { type Metadata } from '../thinq'
 import { allowExtendedType } from '@/util/casting'
 import AABBDevice from './aabb_device'
+import { Enum } from '@/util/enum'
 
 // LG front-load washer — matched on modelId "F3L2CYU__". AABB frames (buf = the AABB body, AA+len and
 // checksum+BB already stripped, buf[0]==0x20 on every frame) are discriminated by buf[1] (NOT buf[3],
@@ -22,13 +23,8 @@ import AABBDevice from './aabb_device'
 // pause/resume, remote start/pause/power-off from the LG app) and correlating each byte change against
 // the LG cloud's own decoded washerDryer state at matching timestamps — not guessed from static analysis.
 
-const STATUS_FRAME_TYPE = 0xec
-const STATUS_FRAME_LEN = 54 // 3B header + 26B record A (old) + 25B record B (current)
-const RECORD_B_OFFSET = 29
-
-const SINGLE_STATUS_FRAME_TYPE = 0xeb
-const SINGLE_STATUS_FRAME_LEN = 28 // 3B header + 25B record, no preceding "old state" record
-const SINGLE_RECORD_OFFSET = 3
+// One status block is a leading byte + the 25B record; 0xEB carries one block, 0xEC two (old, current).
+const STATUS_LENGTH = 26
 
 // Offsets below are relative to record B's own 0x18 marker (rec[0]).
 const PHASE_OFFSET = 1
@@ -72,71 +68,80 @@ const DOOR_CLOSED = 0x02
 
 const PHASE_OFF = 0x00
 
-// Phase/status byte. 0x14 (Sensing) carried over from the original qualitative pass — this session's
-// Speed Wash runs went straight 0x05->0x17 without an observed Sensing step, so it's unconfirmed but
-// harmless to include (anything genuinely unmapped falls back to 'Running').
-const STATUS: Record<number, string> = {
-    0x00: 'Off',
-    0x05: 'Selecting',
-    0x06: 'Paused',
-    0x0a: 'Delay Wash',
-    0x14: 'Sensing',
-    0x17: 'Washing',
-    0x1e: 'Rinsing',
-    0x28: 'Spinning',
-    0x3c: 'Complete',
-}
+// Codes derived from modelJSON & observation of the LG app.
+const STATUS = Enum.of({
+    Off: 0,
+    Standby: [5, 83], // the second code is FROZEN_PREVENT_INITIAL
+    Paused: [6, 85], // the second code is FROZEN_PREVENT_PAUSE
+    Delayed: 10,
+    Detecting: 20,
+    Error: 7, // ERROR_AUTO_OFF
+    Filling: 21,
+    'Detergent amount': 22,
+    Washing: [23, 84], // the second code is FROZEN_PREVENT_RUNNING
+    'Pre-wash': 24,
+    Rinsing: 30,
+    'Rinse hold': 31,
+    Spinning: 40,
+    Drying: 50,
+    End: 60,
+    Refreshing: 61,
+    'Smart Diagnosis': 79,
+    // Not included, because the LG app doesn't label them:
+    // 65 is "AUDIBLE DIAGNOSIS"
+    // 81 is "TUB CLEAN COUNT ALRM"
+})
 
 // Course/dial-position identifier -> name. Live-confirmed by turning the dial through every position and
 // reading the LG cloud's own apCourseFLUpper25inchBaseUS at each stop.
-const COURSE: Record<number, string> = {
-    0x01: 'Tub Clean',
-    0x02: 'Bright Whites',
-    0x03: 'Allergiene',
-    0x04: 'Sanitary',
-    0x05: 'Bedding',
-    0x06: 'Heavy Duty',
-    0x07: 'Normal',
-    0x08: 'Sportswear',
-    0x09: 'Perm Press',
-    0x0a: 'Delicates',
-    0x0b: 'Towels',
-    0x0c: 'Speed Wash',
-    0x0d: 'Rinse+Spin',
-    0x0e: 'Small Load',
-}
+const COURSE = Enum.of({
+    'Tub Clean': 0x01,
+    'Bright Whites': 0x02,
+    Allergiene: 0x03,
+    Sanitary: 0x04,
+    Bedding: 0x05,
+    'Heavy Duty': 0x06,
+    Normal: 0x07,
+    Sportswear: 0x08,
+    'Perm Press': 0x09,
+    Delicates: 0x0a,
+    Towels: 0x0b,
+    'Speed Wash': 0x0c,
+    'Rinse+Spin': 0x0d,
+    'Small Load': 0x0e,
+})
 
 // Soil level 1-5, clean sequential mapping confirmed by single-step toggling against the cloud's
 // soilWash enum.
-const SOIL: Record<number, string> = {
-    1: 'Light',
-    2: 'Light-Normal',
-    3: 'Normal',
-    4: 'Normal-Heavy',
-    5: 'Heavy',
-}
+const SOIL = Enum.of({
+    Light: 1,
+    'Light-Normal': 2,
+    Normal: 3,
+    'Normal-Heavy': 4,
+    Heavy: 5,
+})
 
 // Spin 2-5 confirmed the same way; 1 (No Spin) is implied by the sequence but wasn't directly toggled to.
-const SPIN: Record<number, string> = {
-    1: 'No Spin',
-    2: 'Low',
-    3: 'Medium',
-    4: 'High',
-    5: 'Extra High',
-}
+const SPIN = Enum.of({
+    'No Spin': 1,
+    Low: 2,
+    Medium: 3,
+    High: 4,
+    'Extra High': 5,
+})
 
 // Temp indices confirmed the same way; 3/5 are unused/skipped on this model.
-const TEMP: Record<number, string> = {
-    1: 'Tap Cold',
-    2: 'Cold',
-    4: 'Warm',
-    6: 'Hot',
-    7: 'Extra Hot',
-}
+const TEMP = Enum.of({
+    'Tap Cold': 1,
+    Cold: 2,
+    Warm: 4,
+    Hot: 6,
+    'Extra Hot': 7,
+})
 
 export default class Device extends AABBDevice {
     constructor(HA: Connection, thinq: Thinq2Device, meta: Metadata) {
-        super(HA, thinq)
+        super(HA, thinq, false)
         this.setConfig(
             allowExtendedType({
                 ...HADevice.config(meta, { name: 'LG Washer' }),
@@ -155,7 +160,8 @@ export default class Device extends AABBDevice {
                         state_topic: '$this/status',
                         name: 'Status',
                         icon: 'mdi:state-machine',
-                        // free-text (NOT device_class:enum): unmapped phase codes emit 'Running'.
+                        device_class: 'enum',
+                        options: STATUS.options,
                     },
                     course: {
                         platform: 'sensor',
@@ -276,31 +282,27 @@ export default class Device extends AABBDevice {
     }
 
     processAABB(buf: Buffer) {
-        if (buf[0] !== 0x20 || buf.length < 2) return
-        if (buf[1] === STATUS_FRAME_TYPE) return this.processStatus(buf, RECORD_B_OFFSET, STATUS_FRAME_LEN)
-        if (buf[1] === SINGLE_STATUS_FRAME_TYPE)
-            return this.processStatus(buf, SINGLE_RECORD_OFFSET, SINGLE_STATUS_FRAME_LEN)
+        this.processCommonStatus(buf, 0x20, STATUS_LENGTH, this.processStatus)
         // 0x31 (serial), 0xBD/0xCD (full/idle dumps) and 0x72/0xD8 (heartbeats) are not yet decoded.
     }
 
-    private processStatus(buf: Buffer, recordOffset: number, expectedLen: number) {
-        if (buf.length !== expectedLen) return // reject header/layout drift
-        const rec = buf.subarray(recordOffset)
+    private processStatus(status: Buffer) {
+        const rec = status.subarray(1)
         if (rec[0] !== 0x18) return // record B should always lead with its marker
 
         const phase = rec[PHASE_OFFSET]
         const isOff = phase === PHASE_OFF
 
         this.publishProperty('power', isOff ? 'OFF' : 'ON')
-        this.publishProperty('status', STATUS[phase] ?? 'Running')
-        this.publishProperty('course', COURSE[rec[COURSE_OFFSET]] ?? 'unknown')
+        this.publishProperty('status', STATUS.map(phase))
+        this.publishProperty('course', COURSE.map(rec[COURSE_OFFSET]))
         // Zeroed on Off rather than trusting the raw bytes — a stray leftover minute was observed on a
         // real power-off capture, and a stale countdown while OFF would be misleading in HA regardless.
         this.publishProperty('remaining_time', isOff ? 0 : rec[TIME_HOUR_OFFSET] * 60 + rec[TIME_MIN_OFFSET])
         this.publishProperty('reserve_time', isOff ? 0 : rec[RESERVE_HOUR_OFFSET] * 60 + rec[RESERVE_MIN_OFFSET])
-        this.publishProperty('soil', SOIL[rec[SOIL_OFFSET]] ?? 'unknown')
-        this.publishProperty('spin', SPIN[rec[SPIN_OFFSET]] ?? 'unknown')
-        this.publishProperty('temp', TEMP[rec[TEMP_OFFSET]] ?? 'unknown')
+        this.publishProperty('soil', SOIL.map(rec[SOIL_OFFSET]))
+        this.publishProperty('spin', SPIN.map(rec[SPIN_OFFSET]))
+        this.publishProperty('temp', TEMP.map(rec[TEMP_OFFSET]))
         this.publishProperty('extra_rinse_count', rec[EXTRA_RINSE_COUNT_OFFSET] >> 4)
 
         const flags = rec[FLAGS_OFFSET]

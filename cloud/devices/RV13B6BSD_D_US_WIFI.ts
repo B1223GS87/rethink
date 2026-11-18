@@ -4,6 +4,8 @@ import { type Connection } from '../homeassistant'
 import { type Metadata } from '../thinq'
 import { allowExtendedType } from '@/util/casting'
 import AABBDevice from './aabb_device'
+import { Enum } from '@/util/enum'
+import { STATES, DRY_LEVELS, TEMPERATURES, ERRORS } from './dryer_common'
 
 // LG electric dryer — matched on modelId "RV13B6BSD_D_US_WIFI" (real-world nameplate DLEX3900B, product
 // code RV13B6JSD.ABLEEUS). AABB frames (buf = the AABB body, AA+len and checksum+BB already stripped)
@@ -21,13 +23,8 @@ import AABBDevice from './aabb_device'
 // byte change against the LG cloud's own decoded washerDryer state at matching timestamps — not guessed
 // from static analysis.
 
-const STATUS_FRAME_TYPE = 0xec
-const STATUS_FRAME_LEN = 60 // 3B header + 29B record A (old) + 28B record B (current)
-const RECORD_B_OFFSET = 32
-
-const SINGLE_STATUS_FRAME_TYPE = 0xeb
-const SINGLE_STATUS_FRAME_LEN = 31 // 3B header + 28B record, no preceding "old state" record
-const SINGLE_RECORD_OFFSET = 3
+// One status block is a leading byte + the 28B record; 0xEB carries one block, 0xEC two (old, current).
+const STATUS_LENGTH = 29
 
 // Offsets below are relative to record B's own 0x1b marker (rec[0]).
 const PHASE_OFFSET = 1
@@ -43,6 +40,9 @@ const INITIAL_TIME_MIN_OFFSET = 5
 // rec[6]: course/mode identifier. 14 named dial programs plus Time Dry (engaged by its own button, not a
 // dial position) map to 14 distinct values, confirmed against the cloud's courseDryer27inchBase/timeDry.
 const COURSE_OFFSET = 6
+// rec[7]: error code, located by injecting it into a bridged simulated appliance and reading the cloud's
+// error field.
+const ERROR_OFFSET = 7
 const DRY_LEVEL_OFFSET = 8
 const TEMP_OFFSET = 9
 // rec[15]: options bitfield, each bit isolated via a single-variable toggle against the cloud's enum.
@@ -60,62 +60,29 @@ const OPT2_WRINKLE_CARE = 0x10
 
 const PHASE_OFF = 0x00
 
-// Phase/status byte. 0x01 covers both dial-browsing-before-start and "paused, settings panel open" — the
-// cloud itself calls both of these "INITIAL", so that's the name used here rather than inventing two
-// separate labels for what the appliance treats as one state.
-const STATUS: Record<number, string> = {
-    0x00: 'Off',
-    0x01: 'Initial',
-    0x03: 'Pause',
-    0x32: 'Drying',
-    0x33: 'Cooling',
-    0x04: 'End',
-}
-
 // Course/mode identifier -> name. Live-confirmed against the cloud's courseDryer27inchBase (dial
 // positions) and timeDry (the Time Dry button, which is not a dial position but shares this same byte).
-const COURSE: Record<number, string> = {
-    0x01: 'Heavy Duty',
-    0x02: 'Towels',
-    0x03: 'Normal',
-    0x04: 'Perm Press',
-    0x05: 'Delicates',
-    0x07: 'Bedding',
-    0x08: 'Antibacterial',
-    0x09: 'Small Load',
-    0x0b: 'Sportswear',
-    0x10: 'Speed Dry',
-    0x11: 'Air Dry',
-    0x12: 'Time Dry',
-    0x15: 'Steam Fresh',
-    0x16: 'Steam Sanitary',
-    0x1a: 'Super Dry',
-}
-
-// Dry level 1-5, confirmed via a clean isolated toggle (course/temp held fixed) against the cloud's
-// dryLevel enum. 0 (NO_DRYLEVEL) is used by courses that don't auto-sense dryness (Speed Dry, Air Dry,
-// Steam Fresh, Time Dry) and falls back to 'unknown' below.
-const DRY_LEVEL: Record<number, string> = {
-    1: 'Damp',
-    2: 'Less',
-    3: 'Normal',
-    4: 'More',
-    5: 'Very',
-}
-
-// Temp 1-5, confirmed the same way against the cloud's temp enum. 0 (NO_TEMP) is used by courses with no
-// heating element (Air Dry) and falls back to 'unknown' below.
-const TEMP: Record<number, string> = {
-    1: 'Ultra Low',
-    2: 'Low',
-    3: 'Medium',
-    4: 'Mid High',
-    5: 'High',
-}
+const COURSE = Enum.of({
+    'Heavy Duty': 0x01,
+    Towels: 0x02,
+    Normal: 0x03,
+    'Perm Press': 0x04,
+    Delicates: 0x05,
+    Bedding: 0x07,
+    Antibacterial: 0x08,
+    'Small Load': 0x09,
+    Sportswear: 0x0b,
+    'Speed Dry': 0x10,
+    'Air Dry': 0x11,
+    'Time Dry': 0x12,
+    'Steam Fresh': 0x15,
+    'Steam Sanitary': 0x16,
+    'Super Dry': 0x1a,
+})
 
 export default class Device extends AABBDevice {
     constructor(HA: Connection, thinq: Thinq2Device, meta: Metadata) {
-        super(HA, thinq)
+        super(HA, thinq, false)
         this.setConfig(
             allowExtendedType({
                 ...HADevice.config(meta, { name: 'LG Dryer' }),
@@ -134,7 +101,27 @@ export default class Device extends AABBDevice {
                         state_topic: '$this/status',
                         name: 'Status',
                         icon: 'mdi:state-machine',
-                        // free-text (NOT device_class:enum): unmapped phase codes emit 'Running'.
+                        device_class: 'enum',
+                        options: STATES.options,
+                    },
+                    error: {
+                        platform: 'binary_sensor',
+                        unique_id: '$deviceid-error',
+                        state_topic: '$this/error',
+                        name: 'Error',
+                        icon: 'mdi:check-circle',
+                        device_class: 'problem',
+                        entity_category: 'diagnostic',
+                    },
+                    error_message: {
+                        platform: 'sensor',
+                        unique_id: '$deviceid-error-message',
+                        state_topic: '$this/error_message',
+                        name: 'Error message',
+                        icon: 'mdi:alert-circle-outline',
+                        device_class: 'enum',
+                        entity_category: 'diagnostic',
+                        options: ERRORS.options,
                     },
                     course: {
                         platform: 'sensor',
@@ -225,31 +212,30 @@ export default class Device extends AABBDevice {
     }
 
     processAABB(buf: Buffer) {
-        if (buf[0] !== 0x30 || buf.length < 2) return
-        if (buf[1] === STATUS_FRAME_TYPE) return this.processStatus(buf, RECORD_B_OFFSET, STATUS_FRAME_LEN)
-        if (buf[1] === SINGLE_STATUS_FRAME_TYPE)
-            return this.processStatus(buf, SINGLE_RECORD_OFFSET, SINGLE_STATUS_FRAME_LEN)
+        this.processCommonStatus(buf, 0x30, STATUS_LENGTH, this.processStatus)
         // 0x31 (serial), 0xE2 (idle/keepalive snapshot) and 0x72 (heartbeat) are not yet decoded.
     }
 
-    private processStatus(buf: Buffer, recordOffset: number, expectedLen: number) {
-        if (buf.length !== expectedLen) return // reject header/layout drift
-        const rec = buf.subarray(recordOffset)
+    private processStatus(status: Buffer) {
+        const rec = status.subarray(1)
         if (rec[0] !== 0x1b) return // record B should always lead with its marker
 
         const phase = rec[PHASE_OFFSET]
         const isOff = phase === PHASE_OFF
 
         this.publishProperty('power', isOff ? 'OFF' : 'ON')
-        this.publishProperty('status', STATUS[phase] ?? 'Running')
-        this.publishProperty('course', COURSE[rec[COURSE_OFFSET]] ?? 'unknown')
+        this.publishProperty('status', STATES.map(phase))
+        const error = rec[ERROR_OFFSET]
+        this.publishProperty('error_message', ERRORS.map(error)) // publish message before set error state
+        this.publishProperty('error', error ? 'ON' : 'OFF')
+        this.publishProperty('course', COURSE.map(rec[COURSE_OFFSET]))
         this.publishProperty('remaining_time', isOff ? 0 : rec[TIME_HOUR_OFFSET] * 60 + rec[TIME_MIN_OFFSET])
         this.publishProperty(
             'initial_time',
             isOff ? 0 : rec[INITIAL_TIME_HOUR_OFFSET] * 60 + rec[INITIAL_TIME_MIN_OFFSET],
         )
-        this.publishProperty('dry_level', DRY_LEVEL[rec[DRY_LEVEL_OFFSET]] ?? 'unknown')
-        this.publishProperty('temp', TEMP[rec[TEMP_OFFSET]] ?? 'unknown')
+        this.publishProperty('dry_level', DRY_LEVELS.map(rec[DRY_LEVEL_OFFSET]))
+        this.publishProperty('temp', TEMPERATURES.map(rec[TEMP_OFFSET]))
 
         const flags = rec[FLAGS_OFFSET]
         this.publishProperty('child_lock', (flags & FLAG_CHILD_LOCK) !== 0 ? 'ON' : 'OFF')
@@ -260,10 +246,9 @@ export default class Device extends AABBDevice {
         this.publishProperty('energy_saver', (opt2 & OPT2_ENERGY_SAVER) !== 0 ? 'ON' : 'OFF')
         this.publishProperty('turbo_steam', (opt2 & OPT2_TURBO_STEAM) !== 0 ? 'ON' : 'OFF')
         this.publishProperty('wrinkle_care', (opt2 & OPT2_WRINKLE_CARE) !== 0 ? 'ON' : 'OFF')
-        // not yet located (declared entities intentionally omitted rather than published wrong): error,
-        // door (opening the door mid-cycle just forces the same generic Pause phase a button-press
-        // would — no distinguishing byte or cloud field found, tested both early- and late-cycle),
-        // Anti-Bacterial and Easy Iron (the former is a course on this unit, not a separate toggle; the
+        // not yet located (declared entities intentionally omitted rather than published wrong): door
+        // (opening the door mid-cycle just forces the same generic Pause phase a button-press would — no
+        // distinguishing byte or cloud field found, tested both early- and late-cycle), Anti-Bacterial and Easy Iron (the former is a course on this unit, not a separate toggle; the
         // latter has no control on this physical model's panel at all).
     }
 }

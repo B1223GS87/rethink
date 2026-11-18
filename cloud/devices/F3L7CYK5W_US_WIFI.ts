@@ -4,6 +4,7 @@ import { type Connection } from '../homeassistant'
 import { type Metadata } from '../thinq'
 import { allowExtendedType } from '@/util/casting'
 import AABBDevice from './aabb_device'
+import { Enum } from '@/util/enum'
 
 // LG front-load washer — matched on modelId "F3L7CYK5W_US_WIFI". Shares the AABB record layout of the
 // F3L2CYU__ sibling (25-byte record led by a 0x18 marker) but is NOT an alias of it:
@@ -38,13 +39,8 @@ import AABBDevice from './aabb_device'
 // tool's matchesDevice flag — the dryer on the same account emits washerDryer updates that share key
 // names (state, preState, temp), and merging those in silently corrupts the mapping.
 
-const STATUS_FRAME_TYPE = 0xec
-const STATUS_FRAME_LEN = 54 // 3B header + 26B record A (old) + 25B record B (current)
-const RECORD_B_OFFSET = 29
-
-const SINGLE_STATUS_FRAME_TYPE = 0xeb
-const SINGLE_STATUS_FRAME_LEN = 28 // 3B header + 25B record, no preceding "old state" record
-const SINGLE_RECORD_OFFSET = 3
+// One status block is a leading byte + the 25B record; 0xEB carries one block, 0xEC two (old, current).
+const STATUS_LENGTH = 26
 
 // Status query, sent on every connect. 0xF0ED is the family-wide "report your state" request —
 // the fridges, the EU washers and the US WashTower all use it; actuating commands are 0xF0E5,
@@ -133,70 +129,79 @@ const PHASE_COMPLETE = 0x3c
 // Phase/status byte, named after the cloud's own state enum. Off/Initial/Pause/Add Garments/Rinsing were
 // confirmed directly against the cloud in this session; Sensing/Washing/Spinning/Complete were observed in
 // their correct sequence across three full cycles. Delay Wash (0x0a) is carried over from the sibling and
-// was not exercised. Anything unmapped falls back to 'Running'.
-const STATUS: Record<number, string> = {
-    0x00: 'Off',
-    0x05: 'Initial',
-    0x06: 'Pause',
-    0x0a: 'Delay Wash',
-    0x14: 'Sensing',
-    0x15: 'Add Garments', // cloud: ADD_DRAIN — the paused-with-door-unlocked state
-    0x17: 'Washing',
-    0x1e: 'Rinsing',
-    0x28: 'Spinning',
-    0x3c: 'Complete',
-}
+// was not exercised. Missing codes filled in from modelJSON
+const STATUS = Enum.of({
+    Off: 0,
+    Standby: [5, 83], // the second code is FROZEN_PREVENT_INITIAL
+    Paused: [6, 85], // the second code is FROZEN_PREVENT_PAUSE
+    Delayed: 10,
+    Detecting: 20,
+    Filling: 21, // cloud: ADD_DRAIN — the paused-with-door-unlocked state
+    'Detergent amount': 22,
+    Washing: [23, 84], // the second code is FROZEN_PREVENT_RUNNING
+    'Pre-wash': 24,
+    Rinsing: 30,
+    'Rinse hold': 31,
+    Spinning: 40,
+    Drying: 50,
+    End: 60,
+    Refreshing: 61,
+    'Smart Diagnosis': 79,
+    // Not understood, not included:
+    // 81 is "TUB CLEAN COUNT ALRM"
+    // 101 is "AUDIBLE DIAGNOSIS"
+})
 
 // Course identifier -> name. Every one of the twelve dial positions was confirmed by turning the dial one
 // stop at a time and reading the cloud's apCourseFLUpper25inchBaseUS, then cross-checked against the
 // printed control panel. This table is NOT the sibling's — it disagrees at nine of twelve positions.
 // 0x00 and 0xFE are both no-selection sentinels (0xFE is what this model parks on at power-off).
-const COURSE: Record<number, string> = {
-    0x01: 'Tub Clean',
-    0x02: 'Allergiene',
-    0x03: 'Sanitary',
-    0x04: 'Bedding',
-    0x05: 'Heavy Duty',
-    0x06: 'Normal',
-    0x07: 'Bright Whites',
-    0x08: 'Perm Press',
-    0x09: 'Delicates',
-    0x0a: 'Towels',
-    0x0b: 'Speed Wash',
-    0x0c: 'Downloaded',
-}
+const COURSE = Enum.of({
+    'Tub Clean': 0x01,
+    Allergiene: 0x02,
+    Sanitary: 0x03,
+    Bedding: 0x04,
+    'Heavy Duty': 0x05,
+    Normal: 0x06,
+    'Bright Whites': 0x07,
+    'Perm Press': 0x08,
+    Delicates: 0x09,
+    Towels: 0x0a,
+    'Speed Wash': 0x0b,
+    Downloaded: 0x0c,
+})
 
 // Soil / Spin / Temp index tables, each stepped through every position against the cloud's soilWash, spin
 // and temp enums. These match the sibling exactly. Index 0 means "not applicable" and reports as unknown —
 // it is what the machine shows once a setting stops applying (soil drops to 0 when washing ends, temp when
 // spinning starts, and both while Rinse+Spin is selected).
-const SOIL: Record<number, string> = {
-    1: 'Light',
-    2: 'Light-Normal',
-    3: 'Normal',
-    4: 'Normal-Heavy',
-    5: 'Heavy',
-}
+const SOIL = Enum.of({
+    Light: 1,
+    'Light-Normal': 2,
+    Normal: 3,
+    'Normal-Heavy': 4,
+    Heavy: 5,
+})
 
-const SPIN: Record<number, string> = {
-    1: 'No Spin',
-    2: 'Low',
-    3: 'Medium',
-    4: 'High',
-    5: 'Extra High',
-}
+const SPIN = Enum.of({
+    'No Spin': 1,
+    Low: 2,
+    Medium: 3,
+    High: 4,
+    'Extra High': 5,
+})
 
-const TEMP: Record<number, string> = {
-    1: 'Tap Cold',
-    2: 'Cold',
-    4: 'Warm',
-    6: 'Hot',
-    7: 'Extra Hot',
-}
+const TEMP = Enum.of({
+    'Tap Cold': 1,
+    Cold: 2,
+    Warm: 4,
+    Hot: 6,
+    'Extra Hot': 7,
+})
 
 export default class Device extends AABBDevice {
     constructor(HA: Connection, thinq: Thinq2Device, meta: Metadata) {
-        super(HA, thinq)
+        super(HA, thinq, false)
         this.setConfig(
             allowExtendedType({
                 ...HADevice.config(meta, { name: 'LG Washer' }),
@@ -215,7 +220,8 @@ export default class Device extends AABBDevice {
                         state_topic: '$this/status',
                         name: 'Status',
                         icon: 'mdi:state-machine',
-                        // free-text (NOT device_class:enum): unmapped phase codes emit 'Running'.
+                        device_class: 'enum',
+                        options: STATUS.options,
                     },
                     course: {
                         platform: 'sensor',
@@ -360,7 +366,6 @@ export default class Device extends AABBDevice {
                         state_topic: '$this/tub_clean_count',
                         name: 'Washes since Tub Clean',
                         icon: 'mdi:counter',
-                        state_class: 'total_increasing',
                         entity_category: 'diagnostic',
                     },
                 },
@@ -378,17 +383,13 @@ export default class Device extends AABBDevice {
     }
 
     processAABB(buf: Buffer) {
-        if (buf[0] !== 0x20 || buf.length < 2) return
-        if (buf[1] === STATUS_FRAME_TYPE) return this.processStatus(buf, RECORD_B_OFFSET, STATUS_FRAME_LEN)
-        if (buf[1] === SINGLE_STATUS_FRAME_TYPE)
-            return this.processStatus(buf, SINGLE_RECORD_OFFSET, SINGLE_STATUS_FRAME_LEN)
+        this.processCommonStatus(buf, 0x20, STATUS_LENGTH, this.processStatus)
         // 0xE2 is intentionally NOT handled here despite looking like a valid single-record status frame —
         // see the header note; it is a post-cycle replay of stale data.
     }
 
-    private processStatus(buf: Buffer, recordOffset: number, expectedLen: number) {
-        if (buf.length !== expectedLen) return // reject header/layout drift
-        const rec = buf.subarray(recordOffset)
+    private processStatus(status: Buffer) {
+        const rec = status.subarray(1)
         if (rec[0] !== RECORD_MARKER) return // the record should always lead with its marker
 
         const phase = rec[PHASE_OFFSET]
@@ -399,17 +400,17 @@ export default class Device extends AABBDevice {
         const idle = isOff || phase === PHASE_COMPLETE
 
         this.publishProperty('power', isOff ? 'OFF' : 'ON')
-        this.publishProperty('status', STATUS[phase] ?? 'Running')
-        this.publishProperty('course', COURSE[rec[COURSE_OFFSET]] ?? 'unknown')
+        this.publishProperty('status', STATUS.map(phase))
+        this.publishProperty('course', COURSE.map(rec[COURSE_OFFSET]))
         this.publishProperty('remaining_time', idle ? 0 : rec[TIME_HOUR_OFFSET] * 60 + rec[TIME_MIN_OFFSET])
         this.publishProperty(
             'initial_time',
             idle ? 0 : rec[INITIAL_TIME_HOUR_OFFSET] * 60 + rec[INITIAL_TIME_MIN_OFFSET],
         )
         this.publishProperty('reserve_time', isOff ? 0 : rec[RESERVE_HOUR_OFFSET] * 60 + rec[RESERVE_MIN_OFFSET])
-        this.publishProperty('soil', SOIL[rec[SOIL_OFFSET]] ?? 'unknown')
-        this.publishProperty('spin', SPIN[rec[SPIN_OFFSET]] ?? 'unknown')
-        this.publishProperty('temp', TEMP[rec[TEMP_OFFSET]] ?? 'unknown')
+        this.publishProperty('soil', SOIL.map(rec[SOIL_OFFSET]))
+        this.publishProperty('spin', SPIN.map(rec[SPIN_OFFSET]))
+        this.publishProperty('temp', TEMP.map(rec[TEMP_OFFSET]))
 
         this.publishProperty('rinse_count', rec[RINSE_OFFSET] & 0x0f)
         this.publishProperty('extra_rinse_count', rec[RINSE_OFFSET] >> 4)

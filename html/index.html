@@ -1,9 +1,59 @@
 <!doctype html>
 <html>
     <head>
+        <meta charset="utf-8" />
         <style>
+            /* Materialize sets dark text but no background, which leaves the canvas transparent.
+               Standalone the browser paints it white, but embedded - in a Home Assistant ingress
+               iframe, say - a dark host page shows through and the text becomes unreadable. */
+            :root {
+                color-scheme: light;
+                background: #fff;
+            }
+
             .offline .hide-when-offline {
                 display: none;
+            }
+
+            /*
+             * The names come from a linked ThinQ account, so an installation without one has nothing
+             * to put in this column on any row. A column of em dashes is width spent saying that, on
+             * the widest table on the page, so the column is not shown at all until something has a
+             * name. An appliance the account does not cover still shows the dash, next to the ones
+             * that do have names, because there the column means something.
+             */
+            #devices_table.no-names .dev-name {
+                display: none;
+            }
+
+            nav .brand-logo .logo {
+                height: 1em;
+                vertical-align: -0.1em;
+            }
+
+            nav .revision {
+                padding: 0 15px;
+                font-size: 0.85rem;
+                opacity: 0.8;
+            }
+
+            /* Materialize's small-only breakpoint, where the brand is centred. The title moves up
+               to make room for the version under it. */
+            @media (max-width: 600px) {
+                nav .brand-logo {
+                    line-height: 42px;
+                }
+
+                nav .revision.revision-under-title {
+                    position: absolute;
+                    left: 50%;
+                    bottom: 4px;
+                    transform: translateX(-50%);
+                    padding: 0;
+                    line-height: 1;
+                    font-size: 0.7rem;
+                    white-space: nowrap;
+                }
             }
 
             .status_field {
@@ -15,6 +65,115 @@
                 width: 24px;
                 height: 24px;
             }
+
+            .dev-bridge {
+                width: 11.5em;
+            }
+
+            /* The switch and the cloud-link indicator share one line. */
+            .bridge-cell {
+                display: flex;
+                align-items: center;
+                gap: 0.25rem;
+            }
+
+            #devices_table .dev-model {
+                padding-top: 0px;
+                padding-bottom: 0px;
+            }
+
+            .packageId {
+                font-size: smaller;
+            }
+
+            /* A fixed box rather than an inline icon, for two reasons: it holds its place while it
+               is empty, so a bridge going up and down doesn't shuffle the switch sideways under the
+               pointer; and an inline material-icons glyph sits on the text baseline with the line
+               height's descender gap below it, which left it visibly riding above the switch. */
+            .bridge-cell .bridge-state {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 1.5em;
+                height: 1.5em;
+                line-height: 1;
+            }
+
+            /*
+             * The device list is the widest thing on this page, and the widest thing in it is a
+             * 36-character UUID, so on a phone the whole page ends up scrolling sideways. Below the
+             * width where six columns stop fitting, each row becomes a card instead: the name, model
+             * and id stack in one column, with the bridge switch and the action buttons pinned to the
+             * right where a thumb can still reach them. Nothing is hidden - the id and the platform
+             * just move under the name and get out of the way.
+             */
+            @media (max-width: 720px) {
+                #devices_table thead {
+                    display: none;
+                }
+
+                #devices_table tbody tr {
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) auto auto;
+                    grid-template-areas:
+                        'name     bridge actions'
+                        'model    bridge actions'
+                        'platform bridge actions'
+                        'id       bridge actions';
+                    gap: 0 0.5rem;
+                    align-items: center;
+                    padding: 0.5rem 0;
+                }
+
+                #devices_table tbody td {
+                    border: none;
+                    padding: 0;
+                    min-width: 0;
+                }
+
+                #devices_table .dev-name {
+                    grid-area: name;
+                    font-weight: 500;
+                }
+                #devices_table .dev-model {
+                    grid-area: model;
+                }
+                #devices_table .dev-platform {
+                    grid-area: platform;
+                }
+                #devices_table .dev-id {
+                    grid-area: id;
+                }
+                #devices_table .dev-bridge {
+                    grid-area: bridge;
+                    width: auto;
+                }
+                #devices_table .dev-actions {
+                    grid-area: actions;
+                }
+
+                #devices_table .dev-platform,
+                #devices_table .dev-id {
+                    font-size: 0.75rem;
+                    color: rgba(0, 0, 0, 0.54);
+                }
+
+                /* Cut off rather than wrapped: a UUID broken across three lines is no more readable
+                   than a truncated one, and it drags the row's height with it. Both cells carry the
+                   full text as a title, and the monitor page shows the id in full anyway. */
+                #devices_table .dev-name,
+                #devices_table .dev-id {
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }
+
+                /* The default button padding is wider than the icons need, and here two of them are
+                   competing with the device's own name for the width of a phone. */
+                #devices_table .dev-actions .btn {
+                    padding: 0 0.75rem;
+                }
+            }
         </style>
         <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet" />
         <link
@@ -22,15 +181,25 @@
             href="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0/css/materialize.min.css"
         />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <link rel="icon" type="image/png" href="favicon.png" />
     </head>
 
     <body class="offline">
         <nav class="light-blue lighten-1" role="navigation">
             <div class="nav-wrapper container">
+                <!-- Materialize centres the brand on a narrow screen, so a title wider than the
+                     viewport is itself a reason the page scrolls sideways. Drop the two words that
+                     carry no information once you are looking at the thing. -->
                 <a id="logo-container" href="#" class="brand-logo">
-                    <span class="material-icons">psychology_alt</span>
-                    Rethink management panel
+                    <img class="logo" src="logo.svg" alt="" />
+                    Rethink <span class="hide-on-med-and-down">management panel</span>
                 </a>
+                <!-- On a phone the brand sits in the middle of the bar, and a long git describe
+                     string on the right would run into it, so there it goes under the title. -->
+                <ul class="right hide-on-small-only">
+                    <li><span class="revision">unknown</span></li>
+                </ul>
+                <span class="revision revision-under-title hide-on-med-and-up">unknown</span>
             </div>
         </nav>
         <div class="container">
@@ -41,14 +210,15 @@
 
         <div class="container hide-when-offline">
             <h4 class="header orange-text">Connected devices</h4>
-            <table class="highlight">
+            <table id="devices_table" class="highlight">
                 <thead>
                     <tr>
+                        <th class="dev-name">Name</th>
                         <th>ID</th>
                         <th>Model</th>
                         <th>Platform</th>
                         <th>Bridge</th>
-                        <th>Monitor</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
 
